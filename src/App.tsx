@@ -10,7 +10,7 @@ type View = "today" | "calendar" | "foods" | "settings";
 type FoodSort = "recent" | "updated" | "name";
 type UndoNotice = { message: string; action: () => Promise<void> };
 type FoodDraft = NutritionOcrDraft;
-const APP_VERSION = "0.9.0";
+const APP_VERSION = "0.9.1";
 
 const round = (value: number, digits = 0) => Number(value.toFixed(digits));
 const formatDate = (date: string, options: Intl.DateTimeFormatOptions) =>
@@ -266,7 +266,7 @@ function Calendar({ selectedDate, energyUnit, onSelect, onOpenDay, onEditEntry }
     return localDateKey(date);
   });
   const rangeStart = days[0];
-  const rangeEnd = days.at(-1)!;
+  const rangeEnd = days[days.length - 1];
   const calendarData = useLiveQuery(async () => {
     const [monthEntries, selectedEntries, waterEntries, selectedGoal] = await Promise.all([
       db.mealEntries.where("date").between(rangeStart, rangeEnd, true, true).toArray(),
@@ -323,11 +323,11 @@ function TrendPanel({ energyUnit }: { energyUnit: EnergyUnit }) {
   }), [range]);
   const trendData = useLiveQuery(async () => {
     const [entries, goals] = await Promise.all([
-      db.mealEntries.where("date").between(dates[0], dates.at(-1)!, true, true).toArray(),
+      db.mealEntries.where("date").between(dates[0], dates[dates.length - 1], true, true).toArray(),
       db.dailyGoals.toArray()
     ]);
     return { entries, goals };
-  }, [dates[0], dates.at(-1)]);
+  }, [dates[0], dates[dates.length - 1]]);
   const daily = useMemo(() => dates.map((date) => {
     const nutrition = sumNutrition((trendData?.entries ?? []).filter((entry) => entry.date === date).map((entry) => entry.nutrition));
     return { date, kcal: kjToKcal(nutrition.energyKj), protein: nutrition.proteinG, carbs: nutrition.carbsG, fat: nutrition.fatG };
@@ -356,7 +356,7 @@ function TrendChart({ title, unit, series, dates }: { title: string; unit: strin
   const chartMax = Math.max(1, recordedMax);
   const x = (index: number) => padX + (index / Math.max(1, dates.length - 1)) * (width - padX * 2);
   const y = (value: number) => padTop + (1 - value / chartMax) * (height - padTop - padBottom);
-  return <article className="chart-card"><div className="chart-title"><h3>{title}</h3><strong>最高 {round(recordedMax)} {unit}</strong></div><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title}趋势图`}><line x1={padX} x2={width - padX} y1={height - padBottom} y2={height - padBottom} className="chart-axis" />{series.map((item) => <polyline key={item.label} points={item.values.map((value, index) => `${x(index)},${y(value)}`).join(" ")} fill="none" stroke={item.color} strokeWidth="3" strokeDasharray={item.dashed ? "6 5" : undefined} strokeLinecap="round" strokeLinejoin="round" />)}<text x={padX} y={height - 5}>{formatDate(dates[0], { month: "numeric", day: "numeric" })}</text><text x={width - padX} y={height - 5} textAnchor="end">{formatDate(dates.at(-1)!, { month: "numeric", day: "numeric" })}</text></svg><div className="chart-legend">{series.map((item) => <span key={item.label}><i className={item.dashed ? "dashed" : ""} style={{ background: item.color }} />{item.label}</span>)}</div></article>;
+  return <article className="chart-card"><div className="chart-title"><h3>{title}</h3><strong>最高 {round(recordedMax)} {unit}</strong></div><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title}趋势图`}><line x1={padX} x2={width - padX} y1={height - padBottom} y2={height - padBottom} className="chart-axis" />{series.map((item) => <polyline key={item.label} points={item.values.map((value, index) => `${x(index)},${y(value)}`).join(" ")} fill="none" stroke={item.color} strokeWidth="3" strokeDasharray={item.dashed ? "6 5" : undefined} strokeLinecap="round" strokeLinejoin="round" />)}<text x={padX} y={height - 5}>{formatDate(dates[0], { month: "numeric", day: "numeric" })}</text><text x={width - padX} y={height - 5} textAnchor="end">{formatDate(dates[dates.length - 1], { month: "numeric", day: "numeric" })}</text></svg><div className="chart-legend">{series.map((item) => <span key={item.label}><i className={item.dashed ? "dashed" : ""} style={{ background: item.color }} />{item.label}</span>)}</div></article>;
 }
 
 const colorThemes: { id: ColorTheme; label: string; note: string }[] = [

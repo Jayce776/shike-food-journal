@@ -8,6 +8,9 @@ const base = githubPages ? "/shike-food-journal/" : "/";
 
 export default defineConfig({
   base,
+  build: {
+    target: "safari14"
+  },
   plugins: [
     react(),
     VitePWA({

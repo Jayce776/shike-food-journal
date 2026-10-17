@@ -71,5 +71,6 @@ export interface AppSettings {
   theme: "system" | "light" | "dark";
   colorTheme?: ColorTheme;
   homeMetrics?: DashboardMetricKey[];
+  customCategories?: string[];
   lastBackupAt?: string;
 }

@@ -3,12 +3,14 @@ import { useLiveQuery } from "dexie-react-hooks";
 import { db, goalForDate, localDateKey } from "./db";
 import { gramsFor, kcalToKj, kjToKcal, nutritionFor, scaleNutrition, sumNutrition } from "./domain/nutrition";
 import { selectGoalForDate } from "./domain/goals";
+import { detectedNutritionCount, parseNutritionText, type NutritionOcrDraft } from "./domain/ocr";
 import type { AppSettings, ColorTheme, DailyGoal, DashboardMetricKey, EnergyUnit, Food, InputMode, MealEntry, Nutrients, WaterEntry } from "./types";
 
 type View = "today" | "calendar" | "foods" | "settings";
 type FoodSort = "recent" | "updated" | "name";
 type UndoNotice = { message: string; action: () => Promise<void> };
-const APP_VERSION = "0.8.0";
+type FoodDraft = NutritionOcrDraft;
+const APP_VERSION = "0.9.0";
 
 const round = (value: number, digits = 0) => Number(value.toFixed(digits));
 const formatDate = (date: string, options: Intl.DateTimeFormatOptions) =>
@@ -33,6 +35,8 @@ export default function App() {
   const [selectedDate, setSelectedDate] = useState(today);
   const [loggingFood, setLoggingFood] = useState<Food | null>(null);
   const [editingFood, setEditingFood] = useState<Food | "new" | null>(null);
+  const [foodDraft, setFoodDraft] = useState<FoodDraft | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [editingEntry, setEditingEntry] = useState<MealEntry | null>(null);
   const [foodQuery, setFoodQuery] = useState("");
   const [foodCategory, setFoodCategory] = useState("全部");
@@ -65,6 +69,11 @@ export default function App() {
   const remaining = goalKcal - kcal;
   const progress = Math.max(0, (kcal / goalKcal) * 100);
   const homeMetrics = data?.settings?.homeMetrics ?? defaultHomeMetrics;
+  const availableFoodCategories = Array.from(new Set([
+    ...foodCategories,
+    ...(data?.settings?.customCategories ?? []),
+    ...(data?.foods.map((food) => food.category).filter(Boolean) as string[])
+  ]));
   const visibleFoods = (data?.foods.filter((food) => {
     const query = foodQuery.trim().toLocaleLowerCase("zh-CN");
     const matchesQuery = !query || `${food.name} ${food.brand ?? ""}`.toLocaleLowerCase("zh-CN").includes(query);
@@ -200,10 +209,10 @@ export default function App() {
 
         {view === "foods" && (
           <>
-            <header className="page-header"><div><p className="eyebrow">提前录一次，以后直接选</p><h1>食品库</h1></div><button className="text-button" onClick={() => setEditingFood("new")}>＋ 新增</button></header>
-            <button className="scan-card" onClick={() => flash("拍照识别将在第二阶段接入")}>📷 <span><strong>拍照识别营养表</strong><small>识别后先校对，再保存</small></span><b>›</b></button>
+            <header className="page-header"><div><p className="eyebrow">提前录一次，以后直接选</p><h1>食品库</h1></div><button className="text-button" onClick={() => { setFoodDraft(null); setEditingFood("new"); }}>＋ 新增</button></header>
+            <button className="scan-card" onClick={() => setScanning(true)}>📷 <span><strong>拍照识别营养表</strong><small>照片仅在本机处理，识别后先校对</small></span><b>›</b></button>
             <label className="search-field"><span>⌕</span><input type="search" placeholder="搜索食品或品牌" value={foodQuery} onChange={(event) => setFoodQuery(event.target.value)} /></label>
-            <div className="food-library-toolbar"><div className="category-filter" aria-label="食品分类筛选">{["全部", ...foodCategories].map((category) => <button type="button" key={category} className={foodCategory === category ? "active" : ""} onClick={() => setFoodCategory(category)}>{category}</button>)}</div><label>排序<select value={foodSort} onChange={(event) => setFoodSort(event.target.value as FoodSort)}><option value="recent">最近使用</option><option value="updated">最近编辑</option><option value="name">名称</option></select></label></div>
+            <div className="food-library-toolbar"><div className="category-filter" aria-label="食品分类筛选">{["全部", ...availableFoodCategories].map((category) => <button type="button" key={category} className={foodCategory === category ? "active" : ""} onClick={() => setFoodCategory(category)}>{category}</button>)}</div><label>排序<select value={foodSort} onChange={(event) => setFoodSort(event.target.value as FoodSort)}><option value="recent">最近使用</option><option value="updated">最近编辑</option><option value="name">名称</option></select></label></div>
             <section className="food-grid">
               {visibleFoods.length === 0 && <div className="empty food-empty">没有找到符合条件的食品。</div>}
               {visibleFoods.map((food) => (
@@ -229,7 +238,8 @@ export default function App() {
       </nav>
 
       {loggingFood && <LogSheet food={loggingFood} mode={mode} quantity={quantity} onMode={setMode} onQuantity={setQuantity} onClose={() => setLoggingFood(null)} onSave={saveMeal} />}
-      {editingFood && <FoodEditor food={editingFood === "new" ? null : editingFood} onClose={() => setEditingFood(null)} onSaved={(message) => { setEditingFood(null); flash(message); }} />}
+      {scanning && <ScanEditor onClose={() => setScanning(false)} onDraft={(draft) => { setFoodDraft(draft); setScanning(false); setEditingFood("new"); }} />}
+      {editingFood && <FoodEditor food={editingFood === "new" ? null : editingFood} draft={editingFood === "new" ? foodDraft : null} categories={availableFoodCategories} onClose={() => { setEditingFood(null); setFoodDraft(null); }} onSaved={(message) => { setEditingFood(null); setFoodDraft(null); flash(message); }} />}
       {editingEntry && <MealEditor entry={editingEntry} food={data.foods.find((food) => food.id === editingEntry.foodId) ?? null} onClose={() => setEditingEntry(null)} onSave={updateMeal} onDelete={deleteMeal} />}
       {toast && <div className="toast" role="status">{toast}</div>}
       {undoNotice && <div className="undo-toast" role="status"><span>{undoNotice.message}</span><button onClick={undoLastChange}>撤销</button></div>}
@@ -379,7 +389,7 @@ function Settings({ goal, energyUnit, colorTheme, homeMetrics, onSaved }: { goal
   async function save() {
     await db.dailyGoals.put({ effectiveDate, energyKcal: energy, waterMl: water, proteinG: protein, carbsG: carbs, fatG: fat });
     const existing = await db.settings.get("main");
-    await db.settings.put({ id: "main", energyUnit: unit, theme: "system", colorTheme: accent, homeMetrics: visibleMetrics, lastBackupAt: existing?.lastBackupAt });
+    await db.settings.put({ id: "main", energyUnit: unit, theme: "system", colorTheme: accent, homeMetrics: visibleMetrics, customCategories: existing?.customCategories, lastBackupAt: existing?.lastBackupAt });
     onSaved();
   }
 
@@ -579,19 +589,96 @@ const extraNutrientFields: { key: OptionalNutrientKey; label: string; unit: stri
   { key: "vitaminDMcg", label: "维生素 D", unit: "μg" }
 ];
 
-function FoodEditor({ food, onClose, onSaved }: { food: Food | null; onClose: () => void; onSaved: (message: string) => void }) {
+async function prepareOcrImage(file: File) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const maxSide = 1800;
+    const ratio = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    if (ratio === 1) return file;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * ratio);
+    canvas.height = Math.round(bitmap.height * ratio);
+    canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    return await new Promise<Blob>((resolve) => canvas.toBlob((blob) => resolve(blob ?? file), "image/jpeg", 0.9));
+  } catch {
+    return file;
+  }
+}
+
+function ScanEditor({ onClose, onDraft }: { onClose: () => void; onDraft: (draft: FoodDraft) => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState("");
+  const [progress, setProgress] = useState(0);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<{ draft: FoodDraft; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!file) return setPreview("");
+    const url = URL.createObjectURL(file);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  async function recognize() {
+    if (!file) return;
+    setError("");
+    setResult(null);
+    setProgress(0.02);
+    setStatus("正在准备本地识别组件…");
+    let worker: Awaited<ReturnType<(typeof import("tesseract.js"))["createWorker"]>> | null = null;
+    try {
+      const { createWorker, OEM } = await import("tesseract.js");
+      worker = await createWorker(["chi_sim", "eng"], OEM.LSTM_ONLY, {
+        logger: (message) => {
+          if (typeof message.progress === "number") setProgress(message.progress);
+          if (message.status.includes("recognizing")) setStatus("正在读取营养表文字…");
+          else if (message.status.includes("loading")) setStatus("首次使用正在下载中文识别模型…");
+        }
+      });
+      const image = await prepareOcrImage(file);
+      const output = await worker.recognize(image);
+      const draft = parseNutritionText(output.data.text);
+      setResult({ draft, text: output.data.text });
+      setProgress(1);
+      setStatus(detectedNutritionCount(draft) ? `已识别 ${detectedNutritionCount(draft)}/5 项核心营养` : "没有识别到核心营养字段");
+    } catch {
+      setError("本地识别没有完成。请检查网络后重试；也可以返回食品库手动新增。");
+      setStatus("");
+    } finally {
+      await worker?.terminate();
+    }
+  }
+
+  return <div className="editor-backdrop"><section className="food-editor scan-editor" role="dialog" aria-modal="true" aria-label="拍照识别营养表">
+    <header className="editor-header"><button type="button" onClick={onClose}>取消</button><div><p className="eyebrow">照片不上传</p><h2>识别营养表</h2></div><span /></header>
+    <div className="scan-content">
+      <label className={preview ? "photo-picker has-photo" : "photo-picker"}>{preview ? <img src={preview} alt="待识别的营养成分表" /> : <><b>📷</b><strong>拍摄或选择营养成分表</strong><span>尽量正对包装、光线均匀，只保留表格区域</span></>}<input type="file" accept="image/*" capture="environment" onChange={(event) => { const next = event.target.files?.[0] ?? null; setFile(next); setResult(null); setError(""); }} /></label>
+      {file && <button type="button" className="primary-button" disabled={Boolean(status && !result && !error)} onClick={recognize}>{result ? "重新识别" : "开始本地识别"}</button>}
+      {status && <div className="ocr-progress" role="status"><div><span style={{ width: `${Math.max(4, progress * 100)}%` }} /></div><p>{status}</p></div>}
+      {error && <p className="form-error" role="alert">{error}</p>}
+      {result && <section className="ocr-result"><div className="section-heading"><h3>识别草稿</h3><span>{detectedNutritionCount(result.draft)}/5 项</span></div><div className="ocr-values"><span>能量<strong>{result.draft.energy ?? "—"} {result.draft.energy ? result.draft.energyUnit : ""}</strong></span><span>蛋白质<strong>{result.draft.proteinG ?? "—"} g</strong></span><span>碳水<strong>{result.draft.carbsG ?? "—"} g</strong></span><span>脂肪<strong>{result.draft.fatG ?? "—"} g</strong></span><span>钠<strong>{result.draft.sodiumMg ?? "—"} mg</strong></span></div>{!result.draft.looksLikePer100g && <p className="scan-warning">没有确认到“每100g”标识，带入后请先检查包装的标注基准。</p>}<button type="button" className="primary-button" onClick={() => onDraft(result.draft)}>带入新增食品并校对</button><details><summary>查看识别原文</summary><pre>{result.text || "未读取到文字"}</pre></details></section>}
+      <p className="scan-privacy">识别在当前设备中完成。第一次使用需联网下载中文模型，之后浏览器会尽量复用缓存。</p>
+    </div>
+  </section></div>;
+}
+
+function FoodEditor({ food, draft, categories, onClose, onSaved }: { food: Food | null; draft: FoodDraft | null; categories: string[]; onClose: () => void; onSaved: (message: string) => void }) {
   const [name, setName] = useState(food?.name ?? "");
   const [brand, setBrand] = useState(food?.brand ?? "");
   const [category, setCategory] = useState(food?.category ?? "方便速食");
+  const [addingCategory, setAddingCategory] = useState(false);
+  const [newCategory, setNewCategory] = useState("");
   const [emoji, setEmoji] = useState(food?.emoji ?? "🍱");
   const [servingG, setServingG] = useState(food?.servingG?.toString() ?? "");
   const [packageG, setPackageG] = useState(food?.packageG?.toString() ?? "");
-  const [energyUnit, setEnergyUnit] = useState<EnergyUnit>("kcal");
-  const [energy, setEnergy] = useState(food ? round(kjToKcal(food.per100g.energyKj), 1).toString() : "");
-  const [protein, setProtein] = useState(food?.per100g.proteinG.toString() ?? "");
-  const [carbs, setCarbs] = useState(food?.per100g.carbsG.toString() ?? "");
-  const [fat, setFat] = useState(food?.per100g.fatG.toString() ?? "");
-  const [sodium, setSodium] = useState(food?.per100g.sodiumMg.toString() ?? "");
+  const [energyUnit, setEnergyUnit] = useState<EnergyUnit>(food ? "kcal" : draft?.energyUnit ?? "kcal");
+  const [energy, setEnergy] = useState(food ? round(kjToKcal(food.per100g.energyKj), 1).toString() : draft?.energy?.toString() ?? "");
+  const [protein, setProtein] = useState(food?.per100g.proteinG.toString() ?? draft?.proteinG?.toString() ?? "");
+  const [carbs, setCarbs] = useState(food?.per100g.carbsG.toString() ?? draft?.carbsG?.toString() ?? "");
+  const [fat, setFat] = useState(food?.per100g.fatG.toString() ?? draft?.fatG?.toString() ?? "");
+  const [sodium, setSodium] = useState(food?.per100g.sodiumMg.toString() ?? draft?.sodiumMg?.toString() ?? "");
   const [extras, setExtras] = useState<Record<OptionalNutrientKey, string>>(() => Object.fromEntries(extraNutrientFields.map(({ key }) => [key, food?.per100g[key]?.toString() ?? ""])) as Record<OptionalNutrientKey, string>);
   const [error, setError] = useState("");
   const [confirmArchive, setConfirmArchive] = useState(false);
@@ -634,7 +721,19 @@ function FoodEditor({ food, onClose, onSaved }: { food: Food | null; onClose: ()
       updatedAt: now,
       archived: false
     });
+    if (!foodCategories.includes(category as typeof foodCategories[number])) {
+      const settings = await db.settings.get("main");
+      if (settings) await db.settings.put({ ...settings, customCategories: Array.from(new Set([...(settings.customCategories ?? []), category])) });
+    }
     onSaved(food ? "食品已更新，历史记录保持原样" : "食品已加入食品库");
+  }
+
+  function useNewCategory() {
+    const value = newCategory.trim().slice(0, 12);
+    if (!value) return;
+    setCategory(value);
+    setNewCategory(value);
+    setAddingCategory(false);
   }
 
   async function archive() {
@@ -647,11 +746,13 @@ function FoodEditor({ food, onClose, onSaved }: { food: Food | null; onClose: ()
   return <div className="editor-backdrop"><section className="food-editor" role="dialog" aria-modal="true" aria-label={food ? `编辑${food.name}` : "新增食品"}>
     <header className="editor-header"><button type="button" onClick={onClose}>取消</button><div><p className="eyebrow">数值统一按每 100g</p><h2>{food ? "编辑食品" : "新增食品"}</h2></div><button type="submit" form="food-editor-form">保存</button></header>
     <form id="food-editor-form" onSubmit={save}>
+      {draft && <div className={draft.looksLikePer100g ? "ocr-draft-note" : "ocr-draft-note warning"}><strong>已带入 {detectedNutritionCount(draft)}/5 项识别结果</strong><span>{draft.looksLikePer100g ? "请对照包装逐项确认，再保存。" : "没有确认到“每100g”标识，请先换算并仔细核对。"}</span></div>}
       <section className="editor-card identity-fields">
         <label className="emoji-field">图标<input value={emoji} maxLength={4} onChange={(event) => setEmoji(event.target.value)} /></label>
         <label>食品名称<input autoFocus required value={name} placeholder="例如：番茄牛肉方便面" onChange={(event) => setName(event.target.value)} /></label>
         <label>品牌（可选）<input value={brand} placeholder="包装上的品牌" onChange={(event) => setBrand(event.target.value)} /></label>
-        <label>分类<select value={category} onChange={(event) => setCategory(event.target.value)}>{foodCategories.map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label>分类<select value={category} onChange={(event) => { if (event.target.value === "__new__") setAddingCategory(true); else setCategory(event.target.value); }}>{categories.map((item) => <option key={item}>{item}</option>)}{!categories.includes(category) && <option>{category}</option>}<option value="__new__">＋ 新建分类</option></select></label>
+        {addingCategory && <div className="new-category-row"><input autoFocus value={newCategory} maxLength={12} placeholder="例如：代餐、调味品" onChange={(event) => setNewCategory(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); useNewCategory(); } }} /><button type="button" onClick={useNewCategory}>使用</button></div>}
       </section>
 
       <div className="editor-section-title"><div><p className="eyebrow">方便以后按份或按包记录</p><h3>份量信息</h3></div></div>
@@ -685,7 +786,7 @@ function NumberField({ label, unit, value, onChange, required = false }: { label
 function LogSheet({ food, mode, quantity, onMode, onQuantity, onClose, onSave }: { food: Food; mode: InputMode; quantity: number; onMode: (mode: InputMode) => void; onQuantity: (quantity: number) => void; onClose: () => void; onSave: () => void }) {
   const grams = gramsFor(food, mode, quantity);
   const nutrition = nutritionFor(food.per100g, grams);
-  const increment = mode === "gram" ? 10 : 0.5;
+  const increment = mode === "gram" ? 1 : 0.1;
   const unit = mode === "serving" ? "份" : mode === "package" ? "包" : "克";
-  return <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet" role="dialog" aria-modal="true" aria-label={`记录${food.name}`}><div className="sheet-handle" /><button className="sheet-close" aria-label="关闭" onClick={onClose}>×</button><div className="food-emoji hero">{food.emoji}</div><h2>{food.name}</h2><p>{food.brand}</p><div className="stepper"><button aria-label="减少" onClick={() => onQuantity(Math.max(increment, round(quantity - increment, 1)))}>−</button><div><strong>{quantity}</strong><span>{unit} · 约 {round(grams)}g</span></div><button aria-label="增加" onClick={() => onQuantity(round(quantity + increment, 1))}>＋</button></div><div className="segments"><button className={mode === "serving" ? "active" : ""} onClick={() => { onMode("serving"); onQuantity(1); }}>份</button><button className={mode === "package" ? "active" : ""} onClick={() => { onMode("package"); onQuantity(1); }}>包</button><button className={mode === "gram" ? "active" : ""} onClick={() => { onMode("gram"); onQuantity(100); }}>克</button></div><div className="calculated">本次约 {round(kjToKcal(nutrition.energyKj))} kcal</div><button className="primary-button" onClick={onSave}>加入记录</button></section></div>;
+  return <div className="sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="sheet" role="dialog" aria-modal="true" aria-label={`记录${food.name}`}><div className="sheet-handle" /><button className="sheet-close" aria-label="关闭" onClick={onClose}>×</button><div className="food-emoji hero">{food.emoji}</div><h2>{food.name}</h2><p>{food.brand}</p><div className="stepper"><button aria-label="减少" onClick={() => onQuantity(Math.max(increment, round(quantity - increment, 1)))}>−</button><label className="stepper-value"><input aria-label={`食用${unit}数`} type="number" min={increment} step="0.1" inputMode="decimal" value={quantity} onChange={(event) => { const value = Number(event.target.value); if (Number.isFinite(value) && value > 0) onQuantity(value); }} /><span>{unit} · 约 {round(grams, 1)}g</span></label><button aria-label="增加" onClick={() => onQuantity(round(quantity + increment, 1))}>＋</button></div><div className="segments"><button className={mode === "serving" ? "active" : ""} onClick={() => { onMode("serving"); onQuantity(1); }}>份</button><button className={mode === "package" ? "active" : ""} onClick={() => { onMode("package"); onQuantity(1); }}>包</button><button className={mode === "gram" ? "active" : ""} onClick={() => { onMode("gram"); onQuantity(100); }}>克</button></div><div className="calculated">本次约 {round(kjToKcal(nutrition.energyKj))} kcal</div><button className="primary-button" onClick={onSave}>加入记录</button></section></div>;
 }
